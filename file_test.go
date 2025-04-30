@@ -17,6 +17,59 @@ func init() {
 	testdataFiles, _ = filepath.Glob("testdata/*.parquet")
 }
 
+func TestLiveTable(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "00000-0-d60e9d11-1719-4546-af46-dd75c3ed0f31.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	pr := parquet.NewGenericReader[*Document](f)
+	rows := make([]*Document, 1)
+	// The live table sample file contains 85 rows.
+	// In column "logprobs", row 83 is the last with start offset in page 1 and its values continue in page 2.
+	// Row 84 is the first that starts in the second page (but not exactly on page start). Directly seeking
+	// to row 84 and trying to read it makes the bug manifest. If we would previously seek to row 83 and read a
+	// row, then the bug does not manifest.
+	if err = pr.SeekToRow(84); err != nil {
+		defer pr.Close()
+		t.Fatal(err)
+	}
+	nRead, err := pr.Read(rows)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	if nRead != 1 {
+		t.Fatal("expected to read 1 row")
+	}
+	lenLogprobs := len(rows[0].Logprobs)
+	lenMask := len(rows[0].Mask)
+	lenReward := len(rows[0].Reward)
+	lenTokens := len(rows[0].Tokens)
+	if lenLogprobs > 0 && lenMask > 0 && lenReward > 0 {
+		if lenLogprobs != lenMask || lenMask != lenReward || lenReward != lenTokens/4 {
+			t.Fatalf("document %s was loaded with invalid mask, reward and/or logprobs array lengths, actual lengths were %d, %d and %d",
+				rows[0].DocumentID, lenMask, lenReward, lenLogprobs)
+		} else {
+			t.Logf("document %s was loaded with correct mask, reward and/or logprobs array lengths, actual lengths were %d, %d and %d",
+				rows[0].DocumentID, lenMask, lenReward, lenLogprobs)
+		}
+	}
+}
+
+type Document struct {
+	Tokens        []byte    `parquet:"tokens"`
+	NumTokens     int64     `parquet:"num_tokens"`
+	PartitionID   string    `parquet:"partition_id"`
+	DocumentID    string    `parquet:"document_id"`
+	Mask          []bool    `parquet:"mask,optional,list"`
+	Reward        []float32 `parquet:"reward,optional,list"`
+	Logprobs      []float32 `parquet:"logprobs,optional,list"`
+	GeneratedTime int64     `parquet:"generated_time,timestamp(microsecond),optional"`
+
+	DebugSourceTableOffset int64
+	GeneratedBy            string
+}
+
 func TestOpenFile(t *testing.T) {
 	for _, path := range testdataFiles {
 		t.Run(path, func(t *testing.T) {
